@@ -26,11 +26,22 @@ def buscar_mesa_disponivel(data, hora, pessoas):
     conn = sqlite3.connect(DB)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT mesa FROM reservas
-        WHERE data=? AND hora=? AND status IN ('reservado','confirmado')
-    ''', (data, hora))
-    ocupadas = [r[0] for r in cursor.fetchall()]
+        SELECT mesa, hora FROM reservas
+        WHERE data=? AND status IN ('reservado','confirmado')
+    ''', (data,))
+    reservas_do_dia = cursor.fetchall()
     conn.close()
+
+    hora_obj = datetime.strptime(hora, "%H:%M")
+    
+    ocupadas = []
+    for r_mesa, r_hora in reservas_do_dia:
+        r_hora_obj = datetime.strptime(r_hora, "%H:%M")
+        r_hora_fim = r_hora_obj + timedelta(hours=1)
+        hora_fim = hora_obj + timedelta(hours=1)
+        
+        if max(r_hora_obj, hora_obj) < min(r_hora_fim, hora_fim):
+            ocupadas.append(r_mesa)
 
     for mesa, capacidade in mesas.items():
         if mesa not in ocupadas and pessoas <= capacidade:

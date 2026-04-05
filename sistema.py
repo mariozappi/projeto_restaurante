@@ -48,16 +48,28 @@ mesas = {
 def buscar_mesa_disponivel(data, hora, pessoas):
     """
     Retorna a primeira mesa disponível para o número de pessoas.
-    Cada mesa só pode ter uma reserva por horário, mesmo que não esteja cheia.
+    Considera duração de 1 hora para cada reserva.
     """
     conn = sqlite3.connect('reservas.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT mesa FROM reservas
-        WHERE data=? AND hora=? AND status IN ('reservado','confirmado')
-    ''', (data, hora))
-    ocupadas = [r[0] for r in cursor.fetchall()]
+        SELECT mesa, hora FROM reservas
+        WHERE data=? AND status IN ('reservado','confirmado')
+    ''', (data,))
+    reservas_do_dia = cursor.fetchall()
     conn.close()
+
+    hora_obj = datetime.strptime(hora, "%H:%M")
+    
+    ocupadas = []
+    for r_mesa, r_hora in reservas_do_dia:
+        r_hora_obj = datetime.strptime(r_hora, "%H:%M")
+        r_hora_fim = r_hora_obj + timedelta(hours=1)
+        hora_fim = hora_obj + timedelta(hours=1)
+        
+        # Se os intervalos se sobrepõem: Max das entradas < Min das saídas
+        if max(r_hora_obj, hora_obj) < min(r_hora_fim, hora_fim):
+            ocupadas.append(r_mesa)
 
     for mesa, capacidade in mesas.items():
         if mesa not in ocupadas and pessoas <= capacidade:
@@ -120,9 +132,9 @@ def notificar_clientes():
                     # Aqui enviar WhatsApp real depois
                     print(f"[NOTIFICAÇÃO] Enviar WhatsApp para {r[2]} sobre reserva {r[0]} (confirme para garantir)")
                     
-                if r[5] == "reservado" and segundos_ate_reserva <= 0:
+                if r[5] == "reservado" and segundos_ate_reserva <= -1200:
                     cursor.execute("DELETE FROM reservas WHERE id=?", (r[0],))
-                    print(f"[LIBERADO] Reserva {r[0]} não confirmada, mesa liberada")
+                    print(f"[LIBERADO] Reserva {r[0]} não confirmada após 20min, mesa liberada")
             conn.commit()
             conn.close()
         except Exception as e:
@@ -139,25 +151,49 @@ def index():
     telefone = request.args.get('telefone', '')
     horarios = [f"{h:02d}:{m:02d}" for h in range(8, 22) for m in (0,30)]
     data_hoje = datetime.now().date().isoformat()
+    hora_agora = datetime.now().strftime("%H:%M")
+    
     opcoes_hora = ''
     for h in horarios:
-        hora_obj = datetime.strptime(h, "%H:%M").time()
-        datetime_completo = datetime.combine(datetime.now().date(), hora_obj)
-        if datetime_completo < datetime.now():
-            opcoes_hora += f'<option value="{h}" disabled>{h} (passado)</option>'
-        else:
-            opcoes_hora += f'<option value="{h}">{h}</option>'
+        opcoes_hora += f'<option value="{h}">{h}</option>'
 
     return f'''
     <h2>Reserva de Mesa</h2>
     <form method="POST" action="/reservar">
         Nome: <input name="nome" required><br><br>
         Telefone: <input name="telefone" value="{telefone}" required><br><br>
-        Data: <input type="date" name="data" min="{data_hoje}" required><br><br>
+        Data: <input type="date" name="data" id="data_input" min="{data_hoje}" required><br><br>
         Hora: <select name="hora" required id="hora">{opcoes_hora}</select><br><br>
         Pessoas: <input type="number" name="pessoas" min="1" max="3" required><br><br>
         <button type="submit">Reservar</button>
     </form>
+    <script>
+    const dataInput = document.getElementById('data_input');
+    const horaSelect = document.getElementById('hora');
+    const dataHoje = "{data_hoje}";
+    const horaAgora = "{hora_agora}";
+    
+    function atualizarHorarios() {{
+        const selectedData = dataInput.value;
+        Array.from(horaSelect.options).forEach(opt => {{
+            if (selectedData === dataHoje) {{
+                if (opt.value < horaAgora) {{
+                    opt.disabled = true;
+                    opt.text = opt.value + " (passado)";
+                }} else {{
+                    opt.disabled = false;
+                    opt.text = opt.value;
+                }}
+            }} else {{
+                opt.disabled = false;
+                opt.text = opt.value;
+            }}
+        }});
+    }}
+    
+    dataInput.addEventListener('change', atualizarHorarios);
+    if(dataInput.value) atualizarHorarios();
+    </script>
     '''
 
 @app.route('/reservar', methods=['POST'])
