@@ -36,7 +36,7 @@ mesas = {
     "Interna 1": 2,
     "Interna 2": 2,
     "Interna 3": 2,
-    "Interna 4": 2,
+    "Interna 4": 3,
     "Externa 1": 3,
     "Externa 2": 3,
     "Balcão": 3
@@ -45,11 +45,31 @@ mesas = {
 # =========================
 # Funções auxiliares
 # =========================
-def buscar_mesa_disponivel(data, hora, pessoas):
+def alocar_mesas(data, hora, pessoas, mesa_escolhida):
     """
-    Retorna a primeira mesa disponível para o número de pessoas.
-    Considera duração de 1 hora para cada reserva.
+    Tenta alocar a mesa escolhida. Se as pessoas excederem o limite,
+    busca mesas contíguas adicionais.
     """
+    if mesa_escolhida not in mesas:
+        return False, "Mesa inválida."
+        
+    try:
+        data_datetime = datetime.strptime(data, "%Y-%m-%d")
+        dia_da_semana = data_datetime.weekday()
+        h, m = map(int, hora.split(':'))
+        horario_valido = False
+        if dia_da_semana in (2, 3, 4):
+            if 17 <= h <= 21 or (h == 22 and m == 0):
+                horario_valido = True
+        elif dia_da_semana in (5, 6):
+            if (12 <= h <= 15) or (h == 16 and m == 0) or (18 <= h <= 21) or (h == 22 and m == 0):
+                horario_valido = True
+                
+        if not horario_valido:
+            return False, "Horário de funcionamento não permitido para o dia escolhido."
+    except Exception:
+        pass
+
     conn = sqlite3.connect('reservas.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -61,50 +81,38 @@ def buscar_mesa_disponivel(data, hora, pessoas):
 
     hora_obj = datetime.strptime(hora, "%H:%M")
     
-    ocupadas = []
+    ocupadas = set()
     for r_mesa, r_hora in reservas_do_dia:
         r_hora_obj = datetime.strptime(r_hora, "%H:%M")
         r_hora_fim = r_hora_obj + timedelta(hours=1)
         hora_fim = hora_obj + timedelta(hours=1)
         
-        # Se os intervalos se sobrepõem: Max das entradas < Min das saídas
         if max(r_hora_obj, hora_obj) < min(r_hora_fim, hora_fim):
-            ocupadas.append(r_mesa)
+            ocupadas.add(r_mesa)
 
-    for mesa, capacidade in mesas.items():
-        if mesa not in ocupadas and pessoas <= capacidade:
-            return mesa
-    return None  # Nenhuma mesa disponível
+    if mesa_escolhida in ocupadas:
+        return False, "Sua mesa primária escolhida já está reservada neste horário."
 
-def agendar_reserva(nome, telefone, data, hora, pessoas):
-    """Agendar reserva em uma mesa disponível."""
-    try:
-        data_obj = datetime.strptime(data, "%Y-%m-%d").date()
-        data_iso = str(data_obj)
-    except ValueError:
-        try:
-            data_obj = datetime.strptime(data, "%d/%m/%Y").date()
-            data_iso = str(data_obj)
-        except ValueError:
-            return None, "data_invalida"
+    mesas_alocadas = [mesa_escolhida]
+    pessoas_restantes = pessoas - mesas[mesa_escolhida]
+    
+    if pessoas_restantes <= 0:
+        return True, mesas_alocadas
 
-    mesa_disponivel = buscar_mesa_disponivel(data_iso, hora, pessoas)
-    if mesa_disponivel:
-        mesa = mesa_disponivel
-        status = "reservado"
-    else:
-        mesa = None
-        status = "espera"
+    _prefix = mesa_escolhida.split()[0]
+    outras_mesas = [m for m in mesas.keys() if m != mesa_escolhida and m not in ocupadas]
+    outras_mesas.sort(key=lambda x: (x.split()[0] != _prefix, x)) 
 
-    conn = sqlite3.connect('reservas.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO reservas (nome, telefone, data, hora, pessoas, mesa, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (nome, telefone, data_iso, hora, pessoas, mesa, status))
-    conn.commit()
-    conn.close()
-    return mesa, status
+    for m in outras_mesas:
+        if pessoas_restantes <= 0:
+            break
+        mesas_alocadas.append(m)
+        pessoas_restantes -= mesas[m]
+
+    if pessoas_restantes > 0:
+        return False, "Não há mesas livres suficientes neste horário para comportar todos os convidados."
+
+    return True, mesas_alocadas
 
 # =========================
 # Thread de notificações
@@ -149,46 +157,96 @@ threading.Thread(target=notificar_clientes, daemon=True).start()
 @app.route('/')
 def index():
     telefone = request.args.get('telefone', '')
-    horarios = [f"{h:02d}:{m:02d}" for h in range(8, 22) for m in (0,30)]
+    horarios = [f"{h:02d}:{m:02d}" for h in range(12, 23) for m in (0,30)]
+    if "22:30" in horarios: horarios.remove("22:30")
+    
     data_hoje = datetime.now().date().isoformat()
     hora_agora = datetime.now().strftime("%H:%M")
     
     opcoes_hora = ''
     for h in horarios:
         opcoes_hora += f'<option value="{h}">{h}</option>'
+        
+    opcoes_mesa = ''
+    for mesa, cap in mesas.items():
+        opcoes_mesa += f'<option value="{mesa}">{mesa} (Até {cap} pessoas)</option>'
 
     return f'''
     <h2>Reserva de Mesa</h2>
     <form method="POST" action="/reservar">
         Nome: <input name="nome" required><br><br>
         Telefone: <input name="telefone" value="{telefone}" required><br><br>
+        Mesa: <select name="mesa" required>{opcoes_mesa}</select><br><br>
         Data: <input type="date" name="data" id="data_input" min="{data_hoje}" required><br><br>
         Hora: <select name="hora" required id="hora">{opcoes_hora}</select><br><br>
-        Pessoas: <input type="number" name="pessoas" min="1" max="3" required><br><br>
-        <button type="submit">Reservar</button>
+        Pessoas: <input type="number" name="pessoas" min="1" max="10" required><br><br>
+        <button type="submit" id="btn_reservar">Reservar</button>
     </form>
+    <div id="aviso" style="color: red; font-weight: bold; margin-top: 10px;"></div>
     <script>
     const dataInput = document.getElementById('data_input');
     const horaSelect = document.getElementById('hora');
+    const aviso = document.getElementById('aviso');
+    const btnReservar = document.getElementById('btn_reservar');
     const dataHoje = "{data_hoje}";
     const horaAgora = "{hora_agora}";
     
     function atualizarHorarios() {{
         const selectedData = dataInput.value;
-        Array.from(horaSelect.options).forEach(opt => {{
-            if (selectedData === dataHoje) {{
-                if (opt.value < horaAgora) {{
-                    opt.disabled = true;
-                    opt.text = opt.value + " (passado)";
-                }} else {{
-                    opt.disabled = false;
-                    opt.text = opt.value;
+        if (!selectedData) return;
+        
+        const dateObj = new Date(selectedData + "T00:00:00");
+        const diaSemana = dateObj.getDay();
+        
+        let fechado = false;
+        if (diaSemana === 1 || diaSemana === 2) fechado = true;
+        
+        if (fechado) {{
+            aviso.innerText = "Estamos fechados de segunda e terça-feira.";
+            btnReservar.disabled = true;
+            horaSelect.innerHTML = '<option value="">Fechado</option>';
+            return;
+        }} else {{
+            aviso.innerText = "";
+            btnReservar.disabled = false;
+        }}
+        
+        let opcoesHtml = '';
+        const todosHorarios = {horarios};
+        
+        todosHorarios.forEach(h => {{
+            let hNum = parseInt(h.split(':')[0]);
+            let mNum = parseInt(h.split(':')[1]);
+            
+            let permitido = false;
+            if (diaSemana >= 3 && diaSemana <= 5) {{
+                if ((hNum >= 17 && hNum <= 21) || (hNum === 22 && mNum === 0)) permitido = true;
+            }}
+            else if (diaSemana === 6 || diaSemana === 0) {{
+                if ((hNum >= 12 && hNum <= 15) || (hNum === 16 && mNum === 0) || 
+                    (hNum >= 18 && hNum <= 21) || (hNum === 22 && mNum === 0)) permitido = true;
+            }}
+            
+            if (permitido) {{
+                let text = h;
+                let disabled = false;
+                if (selectedData === dataHoje && h < horaAgora) {{
+                    disabled = true;
+                    text = h + " (passado)";
                 }}
-            }} else {{
-                opt.disabled = false;
-                opt.text = opt.value;
+                if (disabled) {{
+                    opcoesHtml += `<option value="${{h}}" disabled>${{text}}</option>`;
+                }} else {{
+                    opcoesHtml += `<option value="${{h}}">${{text}}</option>`;
+                }}
             }}
         }});
+        
+        if (opcoesHtml === '') {{
+            opcoesHtml = '<option value="">Fora do horário final</option>';
+            btnReservar.disabled = true;
+        }}
+        horaSelect.innerHTML = opcoesHtml;
     }}
     
     dataInput.addEventListener('change', atualizarHorarios);
@@ -199,13 +257,68 @@ def index():
 @app.route('/reservar', methods=['POST'])
 def reservar():
     dados = request.form
-    mesa, status = agendar_reserva(dados['nome'], dados['telefone'], dados['data'], dados['hora'], int(dados['pessoas']))
-    if status == "data_invalida":
-        return "<h3>Data inválida. Use o formato correto.</h3>"
-    if status in ("reservado", "confirmado"):
-        return f"<h3>Reserva {status}! Mesa {mesa}</h3>"
+    try:
+        data_obj = datetime.strptime(dados['data'], "%Y-%m-%d").date()
+        data_iso = str(data_obj)
+    except ValueError:
+        return "<h3>Data inválida.</h3>"
+
+    sucesso, resultado = alocar_mesas(
+        data_iso, 
+        dados['hora'], 
+        int(dados['pessoas']),
+        dados['mesa']
+    )
+    
+    if sucesso:
+        mesas_string = ",".join(resultado)
+        return f'''
+        <h2>Confirme sua Reserva</h2>
+        <p><strong>Nome:</strong> {dados['nome']}</p>
+        <p><strong>Telefone:</strong> {dados['telefone']}</p>
+        <p><strong>Data:</strong> {dados['data']}</p>
+        <p><strong>Hora:</strong> {dados['hora']}</p>
+        <p><strong>Pessoas:</strong> {dados['pessoas']}</p>
+        <p><strong>Mesas Alocadas:</strong> {mesas_string}</p>
+        
+        <form method="POST" action="/efetivar_reserva">
+            <input type="hidden" name="nome" value="{dados['nome']}">
+            <input type="hidden" name="telefone" value="{dados['telefone']}">
+            <input type="hidden" name="data" value="{data_iso}">
+            <input type="hidden" name="hora" value="{dados['hora']}">
+            <input type="hidden" name="pessoas" value="{dados['pessoas']}">
+            <input type="hidden" name="mesas" value="{mesas_string}">
+            <button type="submit" style="background-color: green; color: white; padding: 10px;">Confirmar Agendamento</button>
+            <a href="/" style="margin-left: 15px; color: red; text-decoration: none;">Cancelar e Voltar</a>
+        </form>
+        '''
     else:
-        return "<h3>Sem vagas. Você entrou na fila de espera.</h3>"
+        return f"<h3>Erro na reserva: {resultado}</h3> <br><a href='/'>Tentar Novamente</a>"
+
+@app.route('/efetivar_reserva', methods=['POST'])
+def efetivar_reserva():
+    dados = request.form
+    nome = dados['nome']
+    telefone = dados['telefone']
+    data = dados['data']
+    hora = dados['hora']
+    pessoas = int(dados['pessoas'])
+    mesas_alocadas = dados['mesas'].split(',')
+    
+    status = "reservado"
+    conn = sqlite3.connect('reservas.db')
+    cursor = conn.cursor()
+    
+    for m in mesas_alocadas:
+        cursor.execute('''
+            INSERT INTO reservas (nome, telefone, data, hora, pessoas, mesa, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (nome, telefone, data, hora, pessoas, m, status))
+        
+    conn.commit()
+    conn.close()
+    
+    return "<h3>Reserva confirmada com sucesso! Você receberá nosso contato.</h3> <br><a href='/'>Início</a>"
 
 @app.route('/confirmar/<int:id>')
 def confirmar(id):
